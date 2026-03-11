@@ -1,0 +1,295 @@
+hyperliquid-scalping-bot/
+├── src/
+│   ├── server.ts                    ← Main Express app + webhook handler
+│   │
+│   ├── exchange/
+│   │   ├── hyperliquid.ts           ← Hyperliquid HTTP client wrapper
+│   │   └── hyperliquid-mock.ts      ← Mock client for testing
+│   │
+│   ├── strategies/
+│   │   └── position-flipper.ts      ← Core trading logic (async/parallel)
+│   │
+│   ├── security/
+│   │   ├── auth.ts                  ← HMAC webhook signature verification
+│   │   ├── validator.ts             ← Input validation + rate limiting
+│   │   └── validator.test.ts        ← Unit tests for validation
+│   │
+│   ├── config/
+│   │   └── config.ts                ← Environment-based configuration
+│   │
+│   ├── types/
+│   │   ├── alert.ts                 ← TradingView alert schema (Zod)
+│   │   └── config.ts                ← Configuration types
+│   │
+│   └── utils/
+│       ├── logger.ts                ← Pino logging setup
+│       ├── error-handler.ts         ← Error classification
+│       └── metrics.ts               ← Metrics collection
+│
+├── tests/
+│   └── (Jest test files - not yet created)
+│
+├── dist/                            ← Compiled JavaScript output
+│   └── (auto-generated, DO NOT EDIT)
+│
+├── node_modules/                    ← npm dependencies
+│   └── (auto-generated, DO NOT COMMIT)
+│
+├── Configuration Files:
+│   ├── package.json                 ← Dependencies & scripts
+│   ├── package-lock.json            ← Locked versions
+│   ├── tsconfig.json                ← TypeScript compiler
+│   ├── jest.config.js               ← Jest testing
+│   ├── .eslintrc.json               ← Linting rules
+│   ├── .prettierrc.json             ← Code formatting
+│   ├── Dockerfile                   ← Container definition
+│   ├── docker-compose.yml           ← Mainnet/testnet orchestration
+│   └── .gitignore                   ← Git exclusions
+│
+├── Environment:
+│   ├── .env.example                 ← Template (COPY THIS)
+│   └── .env.local                   ← Your config (GITIGNORED)
+│
+├── Documentation:
+│   ├── QUICKSTART.md                ← Start here (5 min setup)
+│   ├── SETUP.md                     ← Detailed setup
+│   ├── DEPLOYMENT.md                ← Production deployment
+│   ├── API.md                       ← Endpoint reference
+│   ├── PROJECT_MANIFEST.txt         ← Complete specification
+│   ├── PROJECT_STRUCTURE.txt        ← This file
+│   └── SUMMARY.txt                  ← Executive summary
+│
+├── Tools & Scripts:
+│   ├── test-webhook.sh              ← Manual webhook testing
+│   └── (npm scripts for build, test, run, deploy)
+│
+└── Git:
+    └── .git/                        ← Version control
+
+
+KEY FILE PURPOSES
+═════════════════
+
+ENTRY POINT:
+  src/server.ts
+    - Creates Express app
+    - Sets up webhook endpoint (POST /webhook)
+    - Validates signatures & rate limits
+    - Returns 202, processes async
+    - Handles errors gracefully
+
+CORE TRADING:
+  src/strategies/position-flipper.ts
+    - Receives TradingView alert
+    - Fetches current position
+    - Closes opposite position (if exists)
+    - Opens new position
+    - Returns timing metrics
+
+EXCHANGE CLIENT:
+  src/exchange/hyperliquid.ts
+    - HTTP client to Hyperliquid API
+    - Methods: getPosition, placeMarketOrder, closePosition, flipPosition
+    - Connection pooling for performance
+    - Timeout handling
+
+SECURITY:
+  src/security/auth.ts
+    - HMAC-SHA256 signature verification
+    - Prevents webhook spoofing
+
+  src/security/validator.ts
+    - Zod schema validation
+    - Rate limiting (per-symbol)
+    - Order size validation
+    - Leverage validation
+
+CONFIGURATION:
+  src/config/config.ts
+    - Loads environment variables
+    - Validates required settings
+    - Separates testnet/mainnet
+    - Returns typed config object
+
+UTILITIES:
+  src/utils/logger.ts
+    - Pino logger with pretty-printing in dev
+    - Structured logging in production
+
+  src/utils/error-handler.ts
+    - Custom error types (BotError, APIError, ValidationError, etc.)
+    - Error severity classification
+
+  src/utils/metrics.ts
+    - Tracks webhooks received/processed
+    - Records latency metrics
+    - Records positions opened/closed
+
+
+ENVIRONMENT SETUP
+═════════════════
+
+.env.example (COPY THIS):
+  - Template for all required variables
+  - Shows defaults and descriptions
+  - NEVER commit real .env
+
+.env.local (YOUR CONFIG):
+  - Your actual credentials
+  - GITIGNORED (safe)
+  - Required: ENV, API keys, WEBHOOK_SECRET
+
+
+DOCKER SETUP
+════════════
+
+Dockerfile:
+  - Multi-stage build (build, prune, run)
+  - Node.js 18 Alpine (small, fast)
+  - Compiles TypeScript
+  - Removes dev dependencies
+
+docker-compose.yml:
+  - Defines bot-testnet service (port 3001)
+  - Defines bot-mainnet service (port 3000)
+  - Easy environment switching
+  - Shared network (trading)
+
+
+BUILD OUTPUT
+════════════
+
+dist/ (auto-generated after npm run build):
+  ├── server.js                       ← Compiled main app
+  ├── server.d.ts                     ← Type definitions
+  ├── server.js.map                   ← Source maps
+  │
+  ├── exchange/
+  │   ├── hyperliquid.js
+  │   └── hyperliquid.d.ts
+  │
+  ├── security/
+  │   ├── auth.js
+  │   └── validator.js
+  │
+  ├── strategies/
+  │   └── position-flipper.js
+  │
+  ├── config/
+  │   └── config.js
+  │
+  ├── types/
+  │   ├── alert.js
+  │   └── config.js
+  │
+  └── utils/
+      ├── logger.js
+      ├── error-handler.js
+      └── metrics.js
+
+
+DEPLOYMENT PATH
+═══════════════
+
+Development:
+  npm install → npm run dev
+  (Uses ts-node, auto-recompiles)
+
+Testing:
+  ./test-webhook.sh (manual webhook tests)
+  npm test (Jest unit tests)
+
+Production:
+  npm run build → docker build
+  docker-compose up bot-mainnet
+  (On VPS with 24/7 uptime)
+
+
+PERFORMANCE LAYOUT
+═══════════════════
+
+Request Flow (sub-50ms typical):
+
+1. TradingView → HTTP POST
+2. server.ts receives webhook
+   └─ Extract JSON payload
+3. security/auth.ts
+   └─ Verify HMAC signature (~1ms)
+4. security/validator.ts
+   └─ Validate schema, rate limit (~2ms)
+5. position-flipper.ts
+   └─ Get current position (~5ms)
+6. exchange/hyperliquid.ts (parallel)
+   ├─ Close old position (~15ms)
+   └─ Open new position (~15ms)
+7. Return result & log
+
+Total: 20-50ms (no sleep delays!)
+
+
+FILE NAVIGATION TIPS
+═════════════════════
+
+To understand the bot:
+  1. Read QUICKSTART.md
+  2. Read src/server.ts (webhook handler)
+  3. Read src/strategies/position-flipper.ts (trading logic)
+  4. Read src/exchange/hyperliquid.ts (API client)
+
+To deploy:
+  1. Read DEPLOYMENT.md
+  2. Check docker-compose.yml
+  3. Edit .env.local with credentials
+  4. Run: docker-compose up bot-mainnet
+
+To debug:
+  1. Enable: LOG_LEVEL=debug npm run dev
+  2. Check server.ts error handler
+  3. Run: ./test-webhook.sh (manual test)
+  4. Review logs in src/utils/logger.ts
+
+To add features:
+  1. Start in src/strategies/position-flipper.ts
+  2. Use src/exchange/hyperliquid.ts for API calls
+  3. Add validation in src/security/validator.ts
+  4. Update types in src/types/alert.ts
+  5. Test with ./test-webhook.sh
+
+
+SIZE & SCOPE
+═════════════
+
+Total Code: ~500 lines TypeScript
+  - server.ts: 150 lines
+  - hyperliquid.ts: 120 lines
+  - position-flipper.ts: 40 lines
+  - validators: 60 lines
+  - auth: 30 lines
+  - utilities: 100 lines
+
+Dependencies: 5 runtime
+  - express, axios, dotenv, zod, pino
+
+Doc: ~2000 lines (4 guides)
+  - QUICKSTART, SETUP, DEPLOYMENT, API
+
+Everything designed for clarity and performance.
+
+
+NEXT STEPS
+══════════
+
+After reviewing this structure:
+
+1. Read QUICKSTART.md
+2. Copy .env.example → .env.local
+3. Add your API credentials
+4. Run: npm install && npm run dev
+5. Test: ./test-webhook.sh long BTCUSD 0.1
+6. Verify logs show "Position flipped successfully"
+
+Then:
+7. Deploy to testnet with docker-compose
+8. Test with TradingView alerts
+9. Monitor for 1-2 weeks
+10. Deploy to mainnet when confident

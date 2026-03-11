@@ -1,0 +1,42 @@
+version: '3.9'
+
+services:
+  bot-testnet:
+    build: .
+    container_name: hyperliquid-bot-testnet
+    ports:
+      - "3001:3000"
+    environment:
+      ENV: testnet
+      HYPERLIQUID_TESTNET_API_KEY: ${HYPERLIQUID_TESTNET_API_KEY}
+      HYPERLIQUID_TESTNET_PRIVATE_KEY: ${HYPERLIQUID_TESTNET_PRIVATE_KEY}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      LOG_LEVEL: info
+      MAX_POSITION_SIZE: 10
+      MIN_ORDER_SIZE: 0.01
+      MAX_LEVERAGE: 5
+    networks:
+      - trading
+    restart: unless-stopped
+
+  bot-mainnet:
+    build: .
+    container_name: hyperliquid-bot-mainnet
+    ports:
+      - "3000:3000"
+    environment:
+      ENV: mainnet
+      HYPERLIQUID_MAINNET_API_KEY: ${HYPERLIQUID_MAINNET_API_KEY}
+      HYPERLIQUID_MAINNET_PRIVATE_KEY: ${HYPERLIQUID_MAINNET_PRIVATE_KEY}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      LOG_LEVEL: info
+      MAX_POSITION_SIZE: 10
+      MIN_ORDER_SIZE: 0.01
+      MAX_LEVERAGE: 5
+    networks:
+      - trading
+    restart: unless-stopped
+
+networks:
+  trading:
+    driver: bridge

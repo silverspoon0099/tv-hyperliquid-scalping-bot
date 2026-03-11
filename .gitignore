@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cache/
+coverage/
+jest.log
+.curl-history
+
+# Configuration files with sensitive data
+src/config/default-qty.json
