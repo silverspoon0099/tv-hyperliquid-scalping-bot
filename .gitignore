@@ -19,4 +19,4 @@ jest.log
 .curl-history
 
 # Configuration files with sensitive data
-src/config/default-qty.json
+src/config/*.json

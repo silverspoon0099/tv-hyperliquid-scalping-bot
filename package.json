@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --loader ts-node/esm src/server.ts",
-    "build": "tsc",
+    "build": "tsc && npm run copy-config",
+    "copy-config": "cp src/config/*.json dist/config/",
     "start": "node dist/server.js",
     "test": "jest",
     "test:watch": "jest --watch",

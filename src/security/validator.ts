@@ -40,7 +40,7 @@ export function checkRateLimit(ticker: string): boolean {
   return true;
 }
 
-export function validateOrderSize(qty: number): boolean {
+export function validateOrderSize(qty: number, symbol?: string): boolean {
   if (qty < config.trading.minOrderSize) {
     logger.error(
       { qty, min: config.trading.minOrderSize },
@@ -49,9 +49,18 @@ export function validateOrderSize(qty: number): boolean {
     return false;
   }
 
-  if (qty > config.trading.maxPositionSize) {
+  // Use per-token max position size if available, otherwise use global fallback
+  let maxPositionSize = config.trading.maxPositionSize;
+  if (symbol) {
+    const tokenMaxSize = (config.trading.maxPositionSizeMap as Record<string, number>)[symbol];
+    if (tokenMaxSize) {
+      maxPositionSize = tokenMaxSize;
+    }
+  }
+
+  if (qty > maxPositionSize) {
     logger.error(
-      { qty, max: config.trading.maxPositionSize },
+      { qty, max: maxPositionSize, symbol },
       'Order size exceeds maximum'
     );
     return false;

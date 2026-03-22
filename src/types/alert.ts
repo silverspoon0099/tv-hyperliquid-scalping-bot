@@ -7,6 +7,7 @@ export const TradingViewAlertSchema = z.object({
   time: z.number().optional().describe('Timestamp in milliseconds'),
   qty: z.number().positive().optional().describe('Position size (optional)'),
   leverage: z.number().positive().optional().default(1).describe('Leverage multiplier (optional)'),
+  stop_loss: z.number().positive().optional().describe('Stop loss percentage (optional, e.g., 1.5 for 1.5%)'),
 });
 
 export type TradingViewAlert = z.infer<typeof TradingViewAlertSchema>;

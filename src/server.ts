@@ -90,9 +90,21 @@ async function handleWebhook(req: Request): Promise<void> {
     const normalized = normalizeSymbol(alert.ticker);
     const defaultQty = (config.trading.defaultQtyMap as Record<string, number>)[normalized] || 0.01;
     const positionSize = alert.qty ?? defaultQty;
+    
+    // Use default stop loss if not specified in alert (default: 1.5%)
+    const defaultStopLoss = (config.trading.defaultStopLossMap as Record<string, number>)[normalized] || 1.5;
+    const stopLoss = alert.stop_loss ?? defaultStopLoss;
+    
+    // Set qty and stop_loss on alert if not already set
+    if (!alert.qty) {
+      alert.qty = positionSize;
+    }
+    if (!alert.stop_loss) {
+      alert.stop_loss = stopLoss;
+    }
 
     // Validate order parameters
-    if (!validateOrderSize(positionSize)) {
+    if (!validateOrderSize(positionSize, normalized)) {
       logger.error(
         { qty: positionSize },
         'Invalid order size'

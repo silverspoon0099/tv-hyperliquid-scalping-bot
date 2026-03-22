@@ -26,15 +26,29 @@ export async function handlePositionFlip(
       );
     }
 
+    // Determine stop loss: use alert stop_loss, then check default map, then fallback to 1.5%
+    let stopLoss = alert.stop_loss;
+    if (!stopLoss) {
+      stopLoss =
+        config.trading.defaultStopLossMap[symbol] ||
+        config.trading.defaultStopLossMap[alert.ticker] ||
+        1.5;
+      logger.debug(
+        { symbol, stopLoss, source: 'default-stop-loss-map' },
+        'Using default stop loss from config'
+      );
+    }
+
     logger.info(
-      { symbol, action: alert.action, price: alert.price, qty: positionSize },
+      { symbol, action: alert.action, price: alert.price, qty: positionSize, stopLoss },
       'Processing position flip signal'
     );
 
     const result = await hlClient.flipPosition(
       symbol,
       alert.action,
-      positionSize
+      positionSize,
+      stopLoss
     );
 
     if (!result) {

@@ -4,6 +4,18 @@ import { config } from '../config/config.js';
 import logger from '../utils/logger.js';
 import { Position, OrderResult } from '../types/alert.js';
 
+type BookLevel = { px: string; sz: string };
+type L2BookSnapshot = {
+  levels: [BookLevel[], BookLevel[]];
+  time?: number;
+};
+
+type TopOfBook = {
+  bestBid: number;
+  bestAsk: number;
+  ts: number;
+};
+
 export class HyperliquidClient {
   private exchangeClient: ExchangeClient;
   private infoClient: InfoClient;
@@ -13,6 +25,8 @@ export class HyperliquidClient {
   private assetMetaCache = new Map<number, { szDecimals: number; name: string }>();
   private lastMetaFetch = 0;
   private metaCacheTTL = 24 * 60 * 60 * 1000; // 24 hours
+  private bookCache = new Map<string, TopOfBook>();
+  private inflightBookFetch = new Map<string, Promise<TopOfBook | null>>();
 
   constructor() {
     const privateKeyHex = config.privateKeyHex;
@@ -51,18 +65,19 @@ export class HyperliquidClient {
       logger.info('Pre-fetching asset metadata on startup...');
       const meta = await this.infoClient.meta();
       
-      // Cache all assets
+      // Cache all assets and build coin index map
       meta.universe.forEach((asset: any, index: number) => {
         this.assetMetaCache.set(index, {
           szDecimals: asset.szDecimals,
           name: asset.name,
         });
+        this.coinIndexCache.set(asset.name.toUpperCase(), index);
       });
 
       this.lastMetaFetch = Date.now();
       logger.info(
-        { cachedAssets: this.assetMetaCache.size },
-        'Asset metadata pre-loaded (24h cache)'
+        { cachedAssets: this.assetMetaCache.size, coinIndexes: this.coinIndexCache.size },
+        'Asset metadata and coin indexes preloaded'
       );
     } catch (error) {
       logger.error({ error }, 'Failed to pre-fetch asset metadata');
@@ -239,98 +254,230 @@ export class HyperliquidClient {
     return Number(size.toFixed(szDecimals)).toString();
   }
   
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async getTopOfBook(symbol: string): Promise<TopOfBook | null> {
+    const cached = this.bookCache.get(symbol.toUpperCase());
+    const now = Date.now();
+
+    // Reuse hot cache for 300ms window
+    if (cached && now - cached.ts < 300) {
+      return cached;
+    }
+
+    // Deduplicate concurrent fetches
+    const existing = this.inflightBookFetch.get(symbol.toUpperCase());
+    if (existing) return existing;
+
+    const p = (async () => {
+      try {
+        const book = (await this.infoClient.l2Book({
+          coin: symbol.toUpperCase(),
+        })) as L2BookSnapshot;
+
+        const bids = book?.levels?.[0] ?? [];
+        const asks = book?.levels?.[1] ?? [];
+
+        if (!bids.length || !asks.length) {
+          logger.warn({ symbol }, 'Empty L2 book');
+          return null;
+        }
+
+        const bestBid = parseFloat(bids[0].px);
+        const bestAsk = parseFloat(asks[0].px);
+
+        if (
+          !Number.isFinite(bestBid) ||
+          !Number.isFinite(bestAsk) ||
+          bestBid <= 0 ||
+          bestAsk <= 0
+        ) {
+          logger.warn({ symbol, bestBid, bestAsk }, 'Invalid top of book');
+          return null;
+        }
+
+        const top: TopOfBook = {
+          bestBid,
+          bestAsk,
+          ts: Date.now(),
+        };
+
+        this.bookCache.set(symbol.toUpperCase(), top);
+        return top;
+      } catch (error) {
+        logger.error({ error, symbol }, 'Failed to fetch L2 book');
+        return null;
+      } finally {
+        this.inflightBookFetch.delete(symbol.toUpperCase());
+      }
+    })();
+
+    this.inflightBookFetch.set(symbol.toUpperCase(), p);
+    return p;
+  }
+
+  private getAggressiveIocPrice(
+    side: 'long' | 'short',
+    top: TopOfBook,
+    slippageBps: number
+  ): number {
+    const slip = slippageBps / 10_000;
+
+    // long = buy = cross above ask
+    if (side === 'long') {
+      return top.bestAsk * (1 + slip);
+    }
+
+    // short = sell = cross below bid
+    return top.bestBid * (1 - slip);
+  }
+
+  private extractOrderStatus(orderResult: any) {
+    return orderResult?.response?.data?.statuses?.[0] ?? null;
+  }
+
   async placeMarketOrder(
     symbol: string,
     side: 'long' | 'short',
     size: number
   ): Promise<OrderResult | null> {
-    try {
-      const coinIndex = await this.getCoinIndex(symbol);
-      if (coinIndex === null) {
-        throw new Error(`Coin not found: ${symbol}`);
+    return this.placeMarketOrderWithRetry(symbol, side, size);
+  }
+
+  private async placeMarketOrderWithRetry(
+    symbol: string,
+    side: 'long' | 'short',
+    size: number
+  ): Promise<OrderResult | null> {
+    const coinIndex = await this.getCoinIndex(symbol);
+    if (coinIndex === null) throw new Error(`Coin not found: ${symbol}`);
+
+    const assetMeta = await this.getAssetMeta(coinIndex);
+    if (!assetMeta) throw new Error(`Asset metadata not found for ${symbol}`);
+
+    const isBuy = side === 'long';
+    const retryBps = [0, 2, 5, 10, 20]; // 0.01%, 0.05%, 0.10%, 0.20%
+    const orderSize = this.formatHlSize(size, assetMeta.szDecimals);
+
+    for (let attempt = 0; attempt < retryBps.length; attempt++) {
+      const slippageBps = retryBps[attempt];
+      const top = await this.getTopOfBook(symbol);
+
+      if (!top) {
+        logger.warn({ symbol, attempt }, 'No top-of-book available for execution');
+        await this.sleep(50);
+        continue;
       }
 
-      const isBuy = side === 'long';
-
-      // Get asset metadata for correct price precision (cached, updates once per 24h)
-      const assetMeta = await this.getAssetMeta(coinIndex);
-      
-      if (!assetMeta) {
-        throw new Error(`Asset metadata not found for ${symbol}`);
-      }
-  
-      const mids = await this.infoClient.allMids();
-      const currentMid = mids[symbol];
-  
-      if (!currentMid) {
-        throw new Error(`Could not fetch price for ${symbol}`);
-      }
-  
-      const slippagePercent = config.trading.marketOrderSlippagePercent / 100;
-      const midPrice = parseFloat(currentMid);
-  
-      const rawPrice = isBuy
-        ? midPrice * (1 + slippagePercent)
-        : midPrice * (1 - slippagePercent);
-  
+      const rawPrice = this.getAggressiveIocPrice(side, top, slippageBps);
       const marketPrice = this.formatHlPerpPrice(rawPrice, assetMeta.szDecimals);
-      const orderSize = this.formatHlSize(size, assetMeta.szDecimals);
-  
-      logger.debug(
-        { symbol, side, size, orderSize, rawPrice, marketPrice },
-        'Placing market order'
-      );
-  
-      const orderResult = await this.exchangeClient.order({
-        orders: [
+
+      try {
+        logger.debug(
           {
-            a: coinIndex,
-            b: isBuy,
-            p: marketPrice,
-            s: orderSize,
-            r: false,
-            t: {
-              limit: {
-                tif: 'FrontendMarket',
+            symbol,
+            side,
+            size,
+            orderSize,
+            attempt: attempt + 1,
+            slippageBps,
+            bestBid: top.bestBid,
+            bestAsk: top.bestAsk,
+            rawPrice,
+            marketPrice,
+          },
+          'Submitting IOC order'
+        );
+
+        const orderResult = await this.exchangeClient.order({
+          orders: [
+            {
+              a: coinIndex,
+              b: isBuy,
+              p: marketPrice,
+              s: orderSize,
+              r: false,
+              t: {
+                limit: {
+                  tif: 'Ioc',
+                },
               },
             },
+          ],
+          grouping: 'na',
+        });
+
+        const status = this.extractOrderStatus(orderResult);
+
+        if (!status) {
+          logger.warn(
+            { symbol, side, attempt: attempt + 1 },
+            'Missing order status'
+          );
+          await this.sleep(40);
+          continue;
+        }
+
+        if ('error' in status) {
+          logger.warn(
+            {
+              symbol,
+              side,
+              attempt: attempt + 1,
+              slippageBps,
+              error: status.error,
+            },
+            'IOC order returned error'
+          );
+          await this.sleep(40 + attempt * 40);
+          continue;
+        }
+
+        let orderId = Date.now().toString();
+        let executedPrice = 0;
+
+        if ('filled' in status) {
+          orderId = status.filled.oid.toString();
+          executedPrice = parseFloat(status.filled.avgPx) || 0;
+        } else if ('resting' in status) {
+          orderId = status.resting.oid.toString();
+        }
+
+        logger.info(
+          {
+            symbol,
+            side,
+            size,
+            attempt: attempt + 1,
+            slippageBps,
+            orderId,
+            executedPrice,
           },
-        ],
-        grouping: 'na',
-      });
-  
-      let orderId = Date.now().toString();
-      const status = orderResult.response?.data?.statuses?.[0];
-      if (status && typeof status === 'object' && 'resting' in status) {
-        orderId = status.resting.oid.toString();
-      } else if (status && typeof status === 'object' && 'filled' in status) {
-        orderId = status.filled.oid.toString();
-      }
-  
-      // Try to extract filled price if available
-      let executedPrice = 0;
-      if (status && typeof status === 'object' && 'filled' in status) {
-        executedPrice = parseFloat(status.filled.avgPx) || 0;
-      }
+          'IOC order executed'
+        );
 
-      logger.info(
-        { symbol, side, size, orderId, executedPrice },
-        'Market order placed successfully'
-      );
-
-      return {
-        orderId,
-        symbol,
-        side,
-        size,
-        executedPrice,
-        timestamp: Date.now(),
-        status: 'filled',
-      };
-    } catch (error) {
-      logger.error({ error, symbol, side, size }, 'Failed to place market order');
-      return null;
+        return {
+          orderId,
+          symbol,
+          side,
+          size,
+          executedPrice,
+          timestamp: Date.now(),
+          status: 'filled',
+        };
+      } catch (error) {
+        logger.warn(
+          { error, symbol, side, attempt: attempt + 1, slippageBps },
+          'IOC submit failed, retrying'
+        );
+        await this.sleep(40 + attempt * 40);
+      }
     }
+
+    logger.error({ symbol, side, size }, 'All IOC retries failed');
+    return null;
   }
 
   async placeStopLoss(
@@ -424,7 +571,8 @@ export class HyperliquidClient {
   async flipPosition(
     symbol: string,
     newSide: 'long' | 'short',
-    size: number
+    size: number,
+    stopLossPercent: number = 1.5
   ): Promise<{ closed?: OrderResult; opened: OrderResult } | null> {
     try {
       const startTime = Date.now();
@@ -443,24 +591,47 @@ export class HyperliquidClient {
         return null;
       }
 
-      const [closeResult, openResult] = await Promise.all([
-        currentPosition.side && currentPosition.side !== newSide
-          ? this.closePosition(symbol)
-          : Promise.resolve(null),
-        this.placeMarketOrder(symbol, newSide, size),
-      ]);
+      let closeResult = null;
+
+      if (currentPosition.side && currentPosition.side !== newSide) {
+        closeResult = await this.closePosition(symbol);
+      }
+
+      const openResult = await this.placeMarketOrder(symbol, newSide, size);
 
       if (!openResult) {
-        throw new Error('Failed to open new position');
+        // Critical failure: couldn't open new position
+        // Fallback: close the old position if it exists
+        if (closeResult) {
+          logger.error(
+            { symbol, newSide, size },
+            'Failed to open position but old position was closed - MANUAL REVIEW NEEDED'
+          );
+          throw new Error('Failed to open new position after closing old one');
+        } else {
+          logger.error(
+            { symbol, newSide, size },
+            'Failed to open new position - attempting fallback close'
+          );
+          // Try to close whatever position exists as fallback
+          const fallbackClose = await this.closePosition(symbol);
+          if (fallbackClose) {
+            logger.warn(
+              { symbol, fallbackClose },
+              'Fallback close executed due to failed open'
+            );
+          }
+          throw new Error('Failed to open new position - fallback close attempted');
+        }
       }
 
       // Set stop loss for the opened position
-      // LONG: SL is 1.5% below entry (exit if price drops)
-      // SHORT: SL is 1.5% above entry (exit if price rises)
+      // LONG: SL is below entry (exit if price drops)
+      // SHORT: SL is above entry (exit if price rises)
       if (openResult.executedPrice > 0) {
-        const slPlaced = await this.placeStopLoss(symbol, openResult.executedPrice, newSide, size, 1.5);
+        const slPlaced = await this.placeStopLoss(symbol, openResult.executedPrice, newSide, size, stopLossPercent);
         logger.info(
-          { symbol, entryPrice: openResult.executedPrice, side: newSide, slPercentage: 1.5, slPlaced },
+          { symbol, entryPrice: openResult.executedPrice, side: newSide, slPercentage: stopLossPercent, slPlaced },
           'SL placement attempted'
         );
       } else {

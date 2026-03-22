@@ -61,7 +61,8 @@ export class HyperliquidMockClient {
   async flipPosition(
     symbol: string,
     newSide: 'long' | 'short',
-    size: number
+    size: number,
+    stopLossPercent: number = 1.5
   ): Promise<{ closed?: OrderResult; opened: OrderResult } | null> {
     const currentPosition = await this.getPosition(symbol);
 
