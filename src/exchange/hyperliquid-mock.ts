@@ -2,11 +2,16 @@ import logger from '../utils/logger.js';
 import { Position, OrderResult } from '../types/alert.js';
 
 export class HyperliquidMockClient {
+  private label: string;
   private positions = new Map<string, Position>();
   private orderHistory: OrderResult[] = [];
 
+  constructor(label: string = 'mock') {
+    this.label = label;
+  }
+
   async validateApiKeys(): Promise<boolean> {
-    logger.info('Mock: API credentials validated');
+    logger.info({ label: this.label }, 'Mock: API credentials validated');
     return true;
   }
 
@@ -23,7 +28,7 @@ export class HyperliquidMockClient {
         liquidationPrice: 0,
       };
     }
-    logger.debug({ symbol, position }, 'Mock: Position fetched');
+    logger.debug({ symbol, position, label: this.label }, 'Mock: Position fetched');
     return position;
   }
 
@@ -42,45 +47,75 @@ export class HyperliquidMockClient {
       status: 'filled',
     };
 
+    // Track position
+    this.positions.set(symbol, {
+      symbol,
+      side,
+      size,
+      entryPrice: order.executedPrice,
+      leverage: 1,
+      unrealizedPnl: 0,
+      liquidationPrice: 0,
+    });
+
     this.orderHistory.push(order);
-    logger.info({ order }, 'Mock: Order placed');
+    logger.info({ order, label: this.label }, 'Mock: Order placed');
     return order;
+  }
+
+  async placeStopLoss(
+    symbol: string,
+    entryPrice: number,
+    side: 'long' | 'short',
+    positionSize: number,
+    slPercentage: number = 1.5
+  ): Promise<boolean> {
+    logger.info(
+      { symbol, entryPrice, side, positionSize, slPercentage, label: this.label },
+      'Mock: Stop loss placed'
+    );
+    return true;
   }
 
   async closePosition(symbol: string): Promise<OrderResult | null> {
     const position = await this.getPosition(symbol);
     if (!position || position.size === 0) {
-      logger.debug({ symbol }, 'Mock: No position to close');
+      logger.debug({ symbol, label: this.label }, 'Mock: No position to close');
       return null;
     }
 
     const closeSide = position.side === 'long' ? 'short' : 'long';
-    return await this.placeMarketOrder(symbol, closeSide, position.size);
+    const result = await this.placeMarketOrder(symbol, closeSide, position.size);
+
+    // Clear the position after closing
+    this.positions.delete(symbol);
+
+    return result;
   }
 
-  async flipPosition(
+  async openPosition(
     symbol: string,
-    newSide: 'long' | 'short',
+    side: 'long' | 'short',
     size: number,
     stopLossPercent: number = 1.5
-  ): Promise<{ closed?: OrderResult; opened: OrderResult } | null> {
-    const currentPosition = await this.getPosition(symbol);
-
-    const closeResult =
-      currentPosition && currentPosition.side && currentPosition.side !== newSide
-        ? await this.closePosition(symbol)
-        : null;
-
-    const openResult = await this.placeMarketOrder(symbol, newSide, size);
+  ): Promise<{ opened: OrderResult; slPlaced: boolean } | null> {
+    const openResult = await this.placeMarketOrder(symbol, side, size);
 
     if (!openResult) {
       throw new Error('Failed to open new position');
     }
 
-    return {
-      closed: closeResult || undefined,
-      opened: openResult,
-    };
+    const slPlaced = await this.placeStopLoss(symbol, openResult.executedPrice, side, size, stopLossPercent);
+
+    return { opened: openResult, slPlaced };
+  }
+
+  getLabel(): string {
+    return this.label;
+  }
+
+  getAddress(): string {
+    return `0xMOCK_${this.label.toUpperCase()}`;
   }
 
   getOrderHistory(): OrderResult[] {
@@ -90,8 +125,10 @@ export class HyperliquidMockClient {
   reset(): void {
     this.positions.clear();
     this.orderHistory = [];
-    logger.info('Mock: State reset');
+    logger.info({ label: this.label }, 'Mock: State reset');
   }
 }
 
-export const hlMockClient = new HyperliquidMockClient();
+// Two mock wallet instances matching the real setup
+export const hlMockLongClient = new HyperliquidMockClient('long-wallet');
+export const hlMockShortClient = new HyperliquidMockClient('short-wallet');

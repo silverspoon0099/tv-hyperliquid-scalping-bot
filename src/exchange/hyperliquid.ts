@@ -17,6 +17,7 @@ type TopOfBook = {
 };
 
 export class HyperliquidClient {
+  private label: string;
   private exchangeClient: ExchangeClient;
   private infoClient: InfoClient;
   private account: ReturnType<typeof privateKeyToAccount>;
@@ -28,9 +29,8 @@ export class HyperliquidClient {
   private bookCache = new Map<string, TopOfBook>();
   private inflightBookFetch = new Map<string, Promise<TopOfBook | null>>();
 
-  constructor() {
-    const privateKeyHex = config.privateKeyHex;
-
+  constructor(privateKeyHex: `0x${string}`, label: string) {
+    this.label = label;
     this.account = privateKeyToAccount(privateKeyHex);
     this.userAddress = this.account.address;
 
@@ -49,11 +49,12 @@ export class HyperliquidClient {
 
     logger.info(
       {
+        label: this.label,
         userAddress: this.userAddress,
         environment: config.env,
         apiUrl: config.apiUrl,
       },
-      'Hyperliquid client initialized'
+      `Hyperliquid client initialized [${this.label}]`
     );
 
     // Pre-fetch asset metadata on startup for faster first order
@@ -62,10 +63,9 @@ export class HyperliquidClient {
 
   private async initializeAssetMetadata(): Promise<void> {
     try {
-      logger.info('Pre-fetching asset metadata on startup...');
+      logger.info({ label: this.label }, 'Pre-fetching asset metadata on startup...');
       const meta = await this.infoClient.meta();
-      
-      // Cache all assets and build coin index map
+
       meta.universe.forEach((asset: any, index: number) => {
         this.assetMetaCache.set(index, {
           szDecimals: asset.szDecimals,
@@ -76,12 +76,11 @@ export class HyperliquidClient {
 
       this.lastMetaFetch = Date.now();
       logger.info(
-        { cachedAssets: this.assetMetaCache.size, coinIndexes: this.coinIndexCache.size },
+        { label: this.label, cachedAssets: this.assetMetaCache.size, coinIndexes: this.coinIndexCache.size },
         'Asset metadata and coin indexes preloaded'
       );
     } catch (error) {
-      logger.error({ error }, 'Failed to pre-fetch asset metadata');
-      // Don't throw - metadata will be fetched on-demand
+      logger.error({ error, label: this.label }, 'Failed to pre-fetch asset metadata');
     }
   }
 
@@ -92,14 +91,14 @@ export class HyperliquidClient {
       });
 
       if (state?.crossMarginSummary) {
-        logger.info('Hyperliquid API credentials validated');
+        logger.info({ label: this.label }, 'Hyperliquid API credentials validated');
         return true;
       }
 
-      logger.error('Failed to validate API credentials');
+      logger.error({ label: this.label }, 'Failed to validate API credentials');
       return false;
     } catch (error) {
-      logger.error({ error }, 'API validation error');
+      logger.error({ error, label: this.label }, 'API validation error');
       return false;
     }
   }
@@ -111,7 +110,7 @@ export class HyperliquidClient {
       });
 
       if (!state?.assetPositions) {
-        logger.debug({ symbol }, 'No asset positions found in state');
+        logger.debug({ symbol, label: this.label }, 'No asset positions found in state');
         return {
           symbol,
           side: null,
@@ -123,7 +122,6 @@ export class HyperliquidClient {
         };
       }
 
-      // Match by coin name, try normalized symbol first
       const assetData = state.assetPositions.find(
         (pos) => pos.position.coin.toUpperCase() === symbol.toUpperCase()
       );
@@ -158,34 +156,29 @@ export class HyperliquidClient {
 
       return position;
     } catch (error) {
-      logger.error({ error, symbol }, 'Failed to fetch position');
+      logger.error({ error, symbol, label: this.label }, 'Failed to fetch position');
       return null;
     }
   }
 
   private async getAssetMeta(coinIndex: number) {
-    // Check if we have cached metadata
     if (this.assetMetaCache.has(coinIndex)) {
       return this.assetMetaCache.get(coinIndex);
     }
 
-    // Check if cache is still valid (within 24 hours)
     const now = Date.now();
     if (this.lastMetaFetch > 0 && now - this.lastMetaFetch < this.metaCacheTTL) {
-      // Cache is valid but specific asset not cached yet - shouldn't happen, but fetch it
-      logger.debug({ coinIndex }, 'Asset meta not in cache, fetching...');
+      logger.debug({ coinIndex, label: this.label }, 'Asset meta not in cache, fetching...');
     }
 
-    // Fetch meta from API
     const meta = await this.infoClient.meta();
     const assetMeta = meta.universe[coinIndex];
 
     if (!assetMeta) {
-      logger.error({ coinIndex }, 'Asset metadata not found');
+      logger.error({ coinIndex, label: this.label }, 'Asset metadata not found');
       return null;
     }
 
-    // Cache all assets from this meta fetch
     meta.universe.forEach((asset: any, index: number) => {
       this.assetMetaCache.set(index, {
         szDecimals: asset.szDecimals,
@@ -195,7 +188,7 @@ export class HyperliquidClient {
 
     this.lastMetaFetch = now;
     logger.info(
-      { cachedAssets: this.assetMetaCache.size },
+      { label: this.label, cachedAssets: this.assetMetaCache.size },
       'Asset metadata cached (once per 24h)'
     );
 
@@ -219,26 +212,23 @@ export class HyperliquidClient {
         return index;
       }
 
-      logger.warn({ symbol }, 'Coin not found in meta');
+      logger.warn({ symbol, label: this.label }, 'Coin not found in meta');
       return null;
     } catch (error) {
-      logger.error({ error, symbol }, 'Failed to get coin index');
+      logger.error({ error, symbol, label: this.label }, 'Failed to get coin index');
       return null;
     }
   }
 
   private formatHlPerpPrice(price: number, szDecimals: number): string {
     const maxDecimals = Math.max(0, 6 - szDecimals);
-  
-    // Integer prices are always allowed and are the safest for large-price assets like BTC
+
     if (Math.abs(price) >= 30000) {
       return Math.round(price).toString();
     }
-  
-    // First cap decimal places
+
     let p = Number(price.toFixed(maxDecimals));
-  
-    // Then enforce max 5 significant figures for non-integers
+
     if (!Number.isInteger(p) && p !== 0) {
       const abs = Math.abs(p);
       const digitsBeforeDecimal = Math.floor(Math.log10(abs)) + 1;
@@ -246,14 +236,14 @@ export class HyperliquidClient {
       const decimals = Math.min(maxDecimals, allowedDecimalsBySigFigs);
       p = Number(p.toFixed(decimals));
     }
-  
+
     return p.toString();
   }
-  
+
   private formatHlSize(size: number, szDecimals: number): string {
     return Number(size.toFixed(szDecimals)).toString();
   }
-  
+
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -262,12 +252,10 @@ export class HyperliquidClient {
     const cached = this.bookCache.get(symbol.toUpperCase());
     const now = Date.now();
 
-    // Reuse hot cache for 300ms window
     if (cached && now - cached.ts < 300) {
       return cached;
     }
 
-    // Deduplicate concurrent fetches
     const existing = this.inflightBookFetch.get(symbol.toUpperCase());
     if (existing) return existing;
 
@@ -281,7 +269,7 @@ export class HyperliquidClient {
         const asks = book?.levels?.[1] ?? [];
 
         if (!bids.length || !asks.length) {
-          logger.warn({ symbol }, 'Empty L2 book');
+          logger.warn({ symbol, label: this.label }, 'Empty L2 book');
           return null;
         }
 
@@ -294,7 +282,7 @@ export class HyperliquidClient {
           bestBid <= 0 ||
           bestAsk <= 0
         ) {
-          logger.warn({ symbol, bestBid, bestAsk }, 'Invalid top of book');
+          logger.warn({ symbol, bestBid, bestAsk, label: this.label }, 'Invalid top of book');
           return null;
         }
 
@@ -307,7 +295,7 @@ export class HyperliquidClient {
         this.bookCache.set(symbol.toUpperCase(), top);
         return top;
       } catch (error) {
-        logger.error({ error, symbol }, 'Failed to fetch L2 book');
+        logger.error({ error, symbol, label: this.label }, 'Failed to fetch L2 book');
         return null;
       } finally {
         this.inflightBookFetch.delete(symbol.toUpperCase());
@@ -325,12 +313,10 @@ export class HyperliquidClient {
   ): number {
     const slip = slippageBps / 10_000;
 
-    // long = buy = cross above ask
     if (side === 'long') {
       return top.bestAsk * (1 + slip);
     }
 
-    // short = sell = cross below bid
     return top.bestBid * (1 - slip);
   }
 
@@ -358,29 +344,37 @@ export class HyperliquidClient {
     if (!assetMeta) throw new Error(`Asset metadata not found for ${symbol}`);
 
     const isBuy = side === 'long';
-    const retryBps = [0, 2, 5, 10, 20]; // 0.01%, 0.05%, 0.10%, 0.20%
-    const orderSize = this.formatHlSize(size, assetMeta.szDecimals);
+    const retryBps = [0, 2, 5, 10, 20];
+    let remainingSize = size;
+    let totalFilled = 0;
+    let weightedPriceSum = 0;
+    let lastOrderId = '';
 
     for (let attempt = 0; attempt < retryBps.length; attempt++) {
+      if (remainingSize <= 0) break;
+
       const slippageBps = retryBps[attempt];
       const top = await this.getTopOfBook(symbol);
 
       if (!top) {
-        logger.warn({ symbol, attempt }, 'No top-of-book available for execution');
+        logger.warn({ symbol, attempt, label: this.label }, 'No top-of-book available for execution');
         await this.sleep(50);
         continue;
       }
 
+      const orderSize = this.formatHlSize(remainingSize, assetMeta.szDecimals);
       const rawPrice = this.getAggressiveIocPrice(side, top, slippageBps);
       const marketPrice = this.formatHlPerpPrice(rawPrice, assetMeta.szDecimals);
 
       try {
         logger.debug(
           {
+            label: this.label,
             symbol,
             side,
-            size,
+            remainingSize,
             orderSize,
+            totalFilled,
             attempt: attempt + 1,
             slippageBps,
             bestBid: top.bestBid,
@@ -413,7 +407,7 @@ export class HyperliquidClient {
 
         if (!status) {
           logger.warn(
-            { symbol, side, attempt: attempt + 1 },
+            { symbol, side, attempt: attempt + 1, label: this.label },
             'Missing order status'
           );
           await this.sleep(40);
@@ -428,6 +422,7 @@ export class HyperliquidClient {
               attempt: attempt + 1,
               slippageBps,
               error: status.error,
+              label: this.label,
             },
             'IOC order returned error'
           );
@@ -435,49 +430,87 @@ export class HyperliquidClient {
           continue;
         }
 
-        let orderId = Date.now().toString();
-        let executedPrice = 0;
-
         if ('filled' in status) {
-          orderId = status.filled.oid.toString();
-          executedPrice = parseFloat(status.filled.avgPx) || 0;
+          const filledSize = parseFloat(status.filled.totalSz) || 0;
+          const avgPx = parseFloat(status.filled.avgPx) || 0;
+          lastOrderId = status.filled.oid.toString();
+
+          if (filledSize > 0) {
+            weightedPriceSum += avgPx * filledSize;
+            totalFilled += filledSize;
+            remainingSize = Number((size - totalFilled).toFixed(assetMeta.szDecimals));
+
+            logger.info(
+              {
+                label: this.label,
+                symbol,
+                side,
+                attempt: attempt + 1,
+                slippageBps,
+                orderId: lastOrderId,
+                filledSize,
+                avgPx,
+                totalFilled,
+                remainingSize,
+              },
+              'IOC order filled'
+            );
+
+            // Fully filled — done
+            if (remainingSize <= 0) break;
+
+            // Partial fill — invalidate book cache and retry remaining
+            this.bookCache.delete(symbol.toUpperCase());
+            logger.info(
+              { symbol, totalFilled, remainingSize, label: this.label },
+              'Partial fill — retrying remaining size'
+            );
+            await this.sleep(40);
+            continue;
+          }
         } else if ('resting' in status) {
-          orderId = status.resting.oid.toString();
+          lastOrderId = status.resting.oid.toString();
         }
 
-        logger.info(
-          {
-            symbol,
-            side,
-            size,
-            attempt: attempt + 1,
-            slippageBps,
-            orderId,
-            executedPrice,
-          },
-          'IOC order executed'
+        // No fill on this attempt
+        logger.warn(
+          { symbol, side, attempt: attempt + 1, slippageBps, label: this.label },
+          'IOC order not filled'
         );
-
-        return {
-          orderId,
-          symbol,
-          side,
-          size,
-          executedPrice,
-          timestamp: Date.now(),
-          status: 'filled',
-        };
+        await this.sleep(40 + attempt * 40);
       } catch (error) {
         logger.warn(
-          { error, symbol, side, attempt: attempt + 1, slippageBps },
+          { error, symbol, side, attempt: attempt + 1, slippageBps, label: this.label },
           'IOC submit failed, retrying'
         );
         await this.sleep(40 + attempt * 40);
       }
     }
 
-    logger.error({ symbol, side, size }, 'All IOC retries failed');
-    return null;
+    if (totalFilled <= 0) {
+      logger.error({ symbol, side, size, label: this.label }, 'All IOC retries failed — no fills');
+      return null;
+    }
+
+    const avgExecutedPrice = weightedPriceSum / totalFilled;
+    const fillStatus = remainingSize <= 0 ? 'filled' : 'partial';
+
+    if (fillStatus === 'partial') {
+      logger.warn(
+        { symbol, side, requested: size, filled: totalFilled, remaining: remainingSize, label: this.label },
+        'Order partially filled after all retries'
+      );
+    }
+
+    return {
+      orderId: lastOrderId,
+      symbol,
+      side,
+      size: totalFilled,
+      executedPrice: avgExecutedPrice,
+      timestamp: Date.now(),
+      status: fillStatus,
+    };
   }
 
   async placeStopLoss(
@@ -498,9 +531,6 @@ export class HyperliquidClient {
         throw new Error(`Asset metadata not found for ${symbol}`);
       }
 
-      // Calculate SL price based on position side
-      // LONG: SL below entry (entry * (1 - slippage%))
-      // SHORT: SL above entry (entry * (1 + slippage%))
       const slPrice = side === 'long'
         ? entryPrice * (1 - slPercentage / 100)
         : entryPrice * (1 + slPercentage / 100);
@@ -509,24 +539,23 @@ export class HyperliquidClient {
       const isLongPosition = side === 'long';
 
       logger.info(
-        { symbol, entryPrice, side, slPercentage, slPrice: formattedSlPrice },
+        { label: this.label, symbol, entryPrice, side, slPercentage, slPrice: formattedSlPrice },
         'Placing stop loss order'
       );
 
-      // Place SL as trigger order (stop loss)
       const slResult = await this.exchangeClient.order({
         orders: [
           {
             a: coinIndex,
-            b: !isLongPosition, // Opposite side to close position
+            b: !isLongPosition,
             p: formattedSlPrice,
             s: positionSize.toString(),
-            r: true, // Reduce only
+            r: true,
             t: {
               trigger: {
-                isMarket: true, // Market order when triggered
+                isMarket: true,
                 triggerPx: formattedSlPrice,
-                tpsl: 'sl', // Stop loss
+                tpsl: 'sl',
               },
             },
           },
@@ -536,16 +565,16 @@ export class HyperliquidClient {
 
       if (slResult?.status === 'ok') {
         logger.info(
-          { symbol, slPrice: formattedSlPrice },
+          { label: this.label, symbol, slPrice: formattedSlPrice },
           'Stop loss order placed successfully'
         );
         return true;
       }
 
-      logger.error({ symbol, response: slResult?.response }, 'Failed to place SL order');
+      logger.error({ label: this.label, symbol, response: slResult?.response }, 'Failed to place SL order');
       return false;
     } catch (error) {
-      logger.error({ error, symbol }, 'Error placing stop loss');
+      logger.error({ error, symbol, label: this.label }, 'Error placing stop loss');
       return false;
     }
   }
@@ -555,7 +584,7 @@ export class HyperliquidClient {
       const position = await this.getPosition(symbol);
 
       if (!position || position.size === 0) {
-        logger.info({ symbol }, 'No position to close');
+        logger.info({ symbol, label: this.label }, 'No position to close');
         return null;
       }
 
@@ -563,99 +592,71 @@ export class HyperliquidClient {
 
       return await this.placeMarketOrder(symbol, closeSide, position.size);
     } catch (error) {
-      logger.error({ error, symbol }, 'Failed to close position');
+      logger.error({ error, symbol, label: this.label }, 'Failed to close position');
       return null;
     }
   }
 
-  async flipPosition(
+  async openPosition(
     symbol: string,
-    newSide: 'long' | 'short',
+    side: 'long' | 'short',
     size: number,
     stopLossPercent: number = 1.5
-  ): Promise<{ closed?: OrderResult; opened: OrderResult } | null> {
+  ): Promise<{ opened: OrderResult; slPlaced: boolean } | null> {
     try {
       const startTime = Date.now();
-      const currentPosition = await this.getPosition(symbol);
 
-      if (!currentPosition) {
-        throw new Error('Failed to fetch current position');
-      }
+      logger.info(
+        { label: this.label, symbol, side, size, stopLossPercent },
+        'Opening position'
+      );
 
-      // Skip if already in the desired position (no need to flip to same side)
-      if (currentPosition.side === newSide && currentPosition.size > 0) {
-        logger.warn(
-          { symbol, currentSide: currentPosition.side, newSide, size: currentPosition.size },
-          'Skip: Already in desired position'
-        );
+      const openResult = await this.placeMarketOrder(symbol, side, size);
+
+      if (!openResult) {
+        logger.error({ label: this.label, symbol, side, size }, 'Failed to open position');
         return null;
       }
 
-      let closeResult = null;
-
-      if (currentPosition.side && currentPosition.side !== newSide) {
-        closeResult = await this.closePosition(symbol);
-      }
-
-      const openResult = await this.placeMarketOrder(symbol, newSide, size);
-
-      if (!openResult) {
-        // Critical failure: couldn't open new position
-        // Fallback: close the old position if it exists
-        if (closeResult) {
-          logger.error(
-            { symbol, newSide, size },
-            'Failed to open position but old position was closed - MANUAL REVIEW NEEDED'
-          );
-          throw new Error('Failed to open new position after closing old one');
-        } else {
-          logger.error(
-            { symbol, newSide, size },
-            'Failed to open new position - attempting fallback close'
-          );
-          // Try to close whatever position exists as fallback
-          const fallbackClose = await this.closePosition(symbol);
-          if (fallbackClose) {
-            logger.warn(
-              { symbol, fallbackClose },
-              'Fallback close executed due to failed open'
-            );
-          }
-          throw new Error('Failed to open new position - fallback close attempted');
-        }
-      }
-
-      // Set stop loss for the opened position
-      // LONG: SL is below entry (exit if price drops)
-      // SHORT: SL is above entry (exit if price rises)
+      // Place stop loss
+      let slPlaced = false;
       if (openResult.executedPrice > 0) {
-        const slPlaced = await this.placeStopLoss(symbol, openResult.executedPrice, newSide, size, stopLossPercent);
+        slPlaced = await this.placeStopLoss(symbol, openResult.executedPrice, side, openResult.size, stopLossPercent);
         logger.info(
-          { symbol, entryPrice: openResult.executedPrice, side: newSide, slPercentage: stopLossPercent, slPlaced },
+          { label: this.label, symbol, entryPrice: openResult.executedPrice, side, stopLossPercent, slPlaced },
           'SL placement attempted'
         );
       } else {
-        logger.warn(
-          { symbol },
-          'Could not place SL - no filled price available'
-        );
+        logger.warn({ label: this.label, symbol }, 'Could not place SL - no filled price available');
       }
 
       const latency = Date.now() - startTime;
       logger.info(
-        { symbol, newSide, size, latencyMs: latency, closed: !!closeResult },
-        'Position flipped successfully'
+        { label: this.label, symbol, side, size, latencyMs: latency },
+        'Position opened successfully'
       );
 
-      return {
-        closed: closeResult || undefined,
-        opened: openResult,
-      };
+      return { opened: openResult, slPlaced };
     } catch (error) {
-      logger.error({ error, symbol, newSide, size }, 'Position flip failed');
+      logger.error({ error, symbol, side, size, label: this.label }, 'Open position failed');
       return null;
     }
   }
+
+  getLabel(): string {
+    return this.label;
+  }
+
+  getAddress(): string {
+    return this.userAddress;
+  }
 }
 
-export const hlClient = new HyperliquidClient();
+// Two wallet instances: one for longs, one for shorts
+export const longWalletClient = new HyperliquidClient(config.longWalletKeyHex, 'long-wallet');
+export const shortWalletClient = new HyperliquidClient(config.shortWalletKeyHex, 'short-wallet');
+
+// Helper to get the right client by side
+export function getClientForSide(side: 'long' | 'short'): HyperliquidClient {
+  return side === 'long' ? longWalletClient : shortWalletClient;
+}

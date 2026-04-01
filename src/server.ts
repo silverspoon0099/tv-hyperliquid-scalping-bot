@@ -1,12 +1,12 @@
 import express, { Request, Response } from 'express';
 import { config } from './config/config.js';
 import logger from './utils/logger.js';
-import { hlClient } from './exchange/hyperliquid.js';
-import { handlePositionFlip } from './strategies/position-flipper.js';
+import { longWalletClient, shortWalletClient } from './exchange/hyperliquid.js';
+import { handleOpen, handleClose } from './strategies/position-flipper.js';
 import { validateAlert, checkRateLimit, validateOrderSize, validateLeverage } from './security/validator.js';
 import { normalizeSymbol } from './utils/symbol.js';
 import { verifyWebhookSecret } from './security/auth.js';
-import { WebhookResponse } from './types/alert.js';
+import { OpenAlert, CloseAlert } from './types/alert.js';
 
 const app = express();
 
@@ -36,14 +36,14 @@ app.get('/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
     environment: config.env,
+    longWallet: longWalletClient.getAddress(),
+    shortWallet: shortWalletClient.getAddress(),
     timestamp: Date.now(),
   });
 });
 
 // TradingView webhook endpoint
 app.post('/webhook', async (req: Request, res: Response) => {
-  const webhookStartTime = Date.now();
-
   // Immediate acknowledgment (don't block response)
   res.status(202).json({
     status: 'received',
@@ -58,10 +58,9 @@ app.post('/webhook', async (req: Request, res: Response) => {
 
 async function handleWebhook(req: Request): Promise<void> {
   try {
-    // Verify webhook secret from query parameter or header
-    // TradingView sends: http://server/webhook?secret=YOUR_SECRET
+    // Verify webhook secret
     const secretParam = (req.query.secret as string) || (req.headers['x-webhook-secret'] as string);
-    
+
     if (!verifyWebhookSecret(secretParam)) {
       logger.error('Webhook secret verification failed');
       return;
@@ -74,71 +73,83 @@ async function handleWebhook(req: Request): Promise<void> {
       return;
     }
 
-    // Log the alert data for debugging/visibility
     logger.info({ alert }, 'Received valid alert');
 
-    // Rate limiting
-    if (!checkRateLimit(alert.ticker)) {
-      logger.warn(
-        { ticker: alert.ticker },
-        'Webhook rate limited'
-      );
-      return;
-    }
+    // Route based on action type
+    if (alert.action === 'close') {
+      // Close signal
+      const closeAlert = alert as CloseAlert;
 
-    // Use default position size if not specified in alert
-    const normalized = normalizeSymbol(alert.ticker);
-    const defaultQty = (config.trading.defaultQtyMap as Record<string, number>)[normalized] || 0.01;
-    const positionSize = alert.qty ?? defaultQty;
-    
-    // Use default stop loss if not specified in alert (default: 1.5%)
-    const defaultStopLoss = (config.trading.defaultStopLossMap as Record<string, number>)[normalized] || 1.5;
-    const stopLoss = alert.stop_loss ?? defaultStopLoss;
-    
-    // Set qty and stop_loss on alert if not already set
-    if (!alert.qty) {
-      alert.qty = positionSize;
-    }
-    if (!alert.stop_loss) {
-      alert.stop_loss = stopLoss;
-    }
+      // Rate limiting by ticker+side for close
+      if (!checkRateLimit(`${closeAlert.ticker}:close:${closeAlert.side}`)) {
+        logger.warn({ ticker: closeAlert.ticker, side: closeAlert.side }, 'Close webhook rate limited');
+        return;
+      }
 
-    // Validate order parameters
-    if (!validateOrderSize(positionSize, normalized)) {
-      logger.error(
-        { qty: positionSize },
-        'Invalid order size'
-      );
-      return;
-    }
+      const result = await handleClose(closeAlert);
 
-    if (!validateLeverage(alert.leverage || 1)) {
-      logger.error(
-        { leverage: alert.leverage },
-        'Invalid leverage'
-      );
-      return;
-    }
-
-    // Execute position flip
-    const result = await handlePositionFlip(alert);
-
-    if (result) {
-      logger.info(
-        {
-          ticker: alert.ticker,
-          action: alert.action,
-          price: alert.price,
-          latencyMs: result.totalLatencyMs,
-          result,
-        },
-        'Webhook processed successfully'
-      );
+      if (result) {
+        logger.info(
+          {
+            ticker: closeAlert.ticker,
+            side: closeAlert.side,
+            reason: closeAlert.reason,
+            latencyMs: result.totalLatencyMs,
+          },
+          'Close webhook processed successfully'
+        );
+      } else {
+        logger.error({ ticker: closeAlert.ticker, side: closeAlert.side }, 'Close position failed');
+      }
     } else {
-      logger.error(
-        { ticker: alert.ticker },
-        'Position flip failed'
-      );
+      // Open signal (action is "open")
+      const openAlert = alert as OpenAlert;
+
+      // Rate limiting
+      if (!checkRateLimit(`${openAlert.ticker}:open:${openAlert.side}`)) {
+        logger.warn({ ticker: openAlert.ticker, side: openAlert.side }, 'Open webhook rate limited');
+        return;
+      }
+
+      // Use default position size if not specified
+      const normalized = normalizeSymbol(openAlert.ticker);
+      const defaultQty = (config.trading.defaultQtyMap as Record<string, number>)[normalized] || 0.01;
+      const positionSize = openAlert.qty ?? defaultQty;
+
+      const defaultStopLoss = (config.trading.defaultStopLossMap as Record<string, number>)[normalized] || 1.5;
+      const stopLoss = openAlert.stop_loss ?? defaultStopLoss;
+
+      // Set defaults on alert
+      if (!openAlert.qty) openAlert.qty = positionSize;
+      if (!openAlert.stop_loss) openAlert.stop_loss = stopLoss;
+
+      // Validate order parameters
+      if (!validateOrderSize(positionSize, normalized)) {
+        logger.error({ qty: positionSize }, 'Invalid order size');
+        return;
+      }
+
+      if (!validateLeverage(openAlert.leverage || 1)) {
+        logger.error({ leverage: openAlert.leverage }, 'Invalid leverage');
+        return;
+      }
+
+      const result = await handleOpen(openAlert);
+
+      if (result) {
+        logger.info(
+          {
+            ticker: openAlert.ticker,
+            side: openAlert.side,
+            price: openAlert.price,
+            latencyMs: result.totalLatencyMs,
+            slPlaced: result.slPlaced,
+          },
+          'Open webhook processed successfully'
+        );
+      } else {
+        logger.error({ ticker: openAlert.ticker }, 'Open position failed');
+      }
     }
   } catch (error) {
     logger.error({ error }, 'Webhook processing error');
@@ -167,12 +178,29 @@ app.use((req: Request, res: Response) => {
 // Startup
 async function startup() {
   try {
-    // Validate API credentials before starting
-    const isValid = await hlClient.validateApiKeys();
-    if (!isValid) {
-      logger.error('Failed to validate Hyperliquid API credentials');
+    // Validate both wallet credentials
+    const [longValid, shortValid] = await Promise.all([
+      longWalletClient.validateApiKeys(),
+      shortWalletClient.validateApiKeys(),
+    ]);
+
+    if (!longValid) {
+      logger.error('Failed to validate long-wallet API credentials');
       process.exit(1);
     }
+
+    if (!shortValid) {
+      logger.error('Failed to validate short-wallet API credentials');
+      process.exit(1);
+    }
+
+    logger.info(
+      {
+        longWallet: longWalletClient.getAddress(),
+        shortWallet: shortWalletClient.getAddress(),
+      },
+      'Both wallet credentials validated'
+    );
 
     app.listen(config.port, config.host, () => {
       logger.info(
@@ -182,7 +210,7 @@ async function startup() {
           environment: config.env,
           webhookUrl: `http://${config.host}:${config.port}/webhook`,
         },
-        'Server started'
+        'Server started (dual-wallet mode)'
       );
     });
   } catch (error) {

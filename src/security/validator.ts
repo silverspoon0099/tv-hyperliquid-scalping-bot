@@ -13,10 +13,8 @@ export function validateAlert(data: unknown): TradingViewAlert | null {
   }
 }
 
-export function checkRateLimit(ticker: string): boolean {
-  // Extract symbol from ticker (remove .P suffix)
-  const symbol = ticker.split('.')[0];
-  const lastCall = rateLimiter.get(symbol) || 0;
+export function checkRateLimit(key: string): boolean {
+  const lastCall = rateLimiter.get(key) || 0;
   const elapsed = Date.now() - lastCall;
   const limitMs = config.trading.rateLimitMs;
   const remainingMs = Math.max(0, limitMs - elapsed);
@@ -24,19 +22,19 @@ export function checkRateLimit(ticker: string): boolean {
   if (elapsed < limitMs) {
     logger.warn(
       {
-        symbol,
+        key,
         elapsedMs: elapsed,
         limitMs: limitMs,
         remainingMs: remainingMs,
         nextAllowedIn: `${(remainingMs / 1000).toFixed(1)}s`,
       },
-      'Rate limit: Alert rejected (too soon for this symbol)'
+      'Rate limit: Alert rejected (too soon)'
     );
     return false;
   }
 
-  rateLimiter.set(symbol, Date.now());
-  logger.debug({ symbol, limitMs }, 'Rate limit check passed');
+  rateLimiter.set(key, Date.now());
+  logger.debug({ key, limitMs }, 'Rate limit check passed');
   return true;
 }
 
@@ -49,7 +47,6 @@ export function validateOrderSize(qty: number, symbol?: string): boolean {
     return false;
   }
 
-  // Use per-token max position size if available, otherwise use global fallback
   let maxPositionSize = config.trading.maxPositionSize;
   if (symbol) {
     const tokenMaxSize = (config.trading.maxPositionSizeMap as Record<string, number>)[symbol];

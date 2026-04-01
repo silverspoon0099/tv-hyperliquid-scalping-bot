@@ -1,19 +1,21 @@
-import { TradingViewAlert, PositionFlipResult } from '../types/alert.js';
-import { hlClient } from '../exchange/hyperliquid.js';
+import { OpenAlert, CloseAlert, OpenResult, CloseResult } from '../types/alert.js';
+import { getClientForSide } from '../exchange/hyperliquid.js';
 import { config } from '../config/config.js';
 import logger from '../utils/logger.js';
 import { normalizeSymbol } from '../utils/symbol.js';
 
-export async function handlePositionFlip(
-  alert: TradingViewAlert
-): Promise<PositionFlipResult | null> {
+/**
+ * Handle an "open" signal: open a position in the corresponding wallet (long-wallet or short-wallet).
+ */
+export async function handleOpen(alert: OpenAlert): Promise<OpenResult | null> {
   const startTime = Date.now();
 
   try {
-    // Normalize the symbol for Hyperliquid API compatibility
     const symbol = normalizeSymbol(alert.ticker);
+    const side = alert.side;
+    const client = getClientForSide(side);
 
-    // Determine position size: use alert qty, then check default map, then fallback
+    // Determine position size
     let positionSize = alert.qty;
     if (!positionSize) {
       positionSize =
@@ -26,7 +28,7 @@ export async function handlePositionFlip(
       );
     }
 
-    // Determine stop loss: use alert stop_loss, then check default map, then fallback to 1.5%
+    // Determine stop loss
     let stopLoss = alert.stop_loss;
     if (!stopLoss) {
       stopLoss =
@@ -40,19 +42,14 @@ export async function handlePositionFlip(
     }
 
     logger.info(
-      { symbol, action: alert.action, price: alert.price, qty: positionSize, stopLoss },
-      'Processing position flip signal'
+      { symbol, side, price: alert.price, qty: positionSize, stopLoss, wallet: client.getLabel() },
+      'Processing open signal'
     );
 
-    const result = await hlClient.flipPosition(
-      symbol,
-      alert.action,
-      positionSize,
-      stopLoss
-    );
+    const result = await client.openPosition(symbol, side, positionSize, stopLoss);
 
     if (!result) {
-      throw new Error('Position flip returned null');
+      throw new Error('Open position returned null');
     }
 
     const totalLatency = Date.now() - startTime;
@@ -60,23 +57,68 @@ export async function handlePositionFlip(
     logger.info(
       {
         symbol,
-        oldSide: result.closed?.side,
-        newSide: result.opened.side,
+        side,
+        wallet: client.getLabel(),
         totalLatencyMs: totalLatency,
+        slPlaced: result.slPlaced,
       },
-      'Position flip completed'
+      'Position opened'
     );
 
     return {
-      closed: result.closed,
       opened: result.opened,
+      slPlaced: result.slPlaced,
       totalLatencyMs: totalLatency,
     };
   } catch (error) {
-    logger.error(
-      { error, alert },
-      'Position flip failed'
+    logger.error({ error, alert }, 'Open position failed');
+    return null;
+  }
+}
+
+/**
+ * Handle a "close" signal: close the position in the wallet matching the side.
+ */
+export async function handleClose(alert: CloseAlert): Promise<CloseResult | null> {
+  const startTime = Date.now();
+
+  try {
+    const symbol = normalizeSymbol(alert.ticker);
+    const client = getClientForSide(alert.side);
+
+    logger.info(
+      { symbol, side: alert.side, reason: alert.reason, price: alert.price, wallet: client.getLabel() },
+      'Processing close signal'
     );
+
+    const closeResult = await client.closePosition(symbol);
+
+    if (!closeResult) {
+      logger.warn(
+        { symbol, side: alert.side, wallet: client.getLabel() },
+        'No position to close or close failed'
+      );
+      return null;
+    }
+
+    const totalLatency = Date.now() - startTime;
+
+    logger.info(
+      {
+        symbol,
+        side: alert.side,
+        wallet: client.getLabel(),
+        totalLatencyMs: totalLatency,
+      },
+      'Position closed'
+    );
+
+    return {
+      closed: closeResult,
+      totalLatencyMs: totalLatency,
+    };
+  } catch (error) {
+    logger.error({ error, alert }, 'Close position failed');
     return null;
   }
 }
