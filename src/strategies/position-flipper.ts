@@ -41,6 +41,16 @@ export async function handleOpen(alert: OpenAlert): Promise<OpenResult | null> {
       );
     }
 
+    // Skip if same-direction position already exists
+    const existing = await client.getPosition(symbol);
+    if (existing && existing.side === side && existing.size > 0) {
+      logger.warn(
+        { symbol, side, existingSize: existing.size, wallet: client.getLabel() },
+        'Position already open in same direction — skipping'
+      );
+      return null;
+    }
+
     logger.info(
       { symbol, side, price: alert.price, qty: positionSize, stopLoss, wallet: client.getLabel() },
       'Processing open signal'

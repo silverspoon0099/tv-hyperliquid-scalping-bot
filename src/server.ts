@@ -10,6 +10,49 @@ import { OpenAlert, CloseAlert } from './types/alert.js';
 
 const app = express();
 
+// Disable Express fingerprinting
+app.disable('x-powered-by');
+
+// Trust reverse proxy (Nginx/Caddy) so req.ip uses X-Forwarded-For
+app.set('trust proxy', 'loopback');
+
+// TradingView webhook IPs (https://www.tradingview.com/support/solutions/43000529348)
+const TRADINGVIEW_IPS = new Set([
+  '52.89.214.238',
+  '34.212.75.30',
+  '54.218.53.128',
+  '52.32.178.7',
+]);
+
+// Early reject: only allow known routes, drop everything else silently
+app.use((req: Request, res: Response, next) => {
+  const isHealth = req.method === 'GET' && req.path === '/health';
+  const isWebhook = req.method === 'POST' && req.path === '/webhook';
+
+  if (!isHealth && !isWebhook) {
+    // Silent drop — no JSON body, no server info, just close
+    res.status(404).end();
+    return;
+  }
+
+  next();
+});
+
+// IP allowlist for webhook (skip in test/dev if needed)
+app.post('/webhook', (req: Request, res: Response, next) => {
+  const clientIp = req.ip || req.socket.remoteAddress || '';
+  // Normalize IPv6-mapped IPv4 (::ffff:1.2.3.4 -> 1.2.3.4)
+  const normalizedIp = clientIp.replace(/^::ffff:/, '');
+
+  if (config.env === 'mainnet' && !TRADINGVIEW_IPS.has(normalizedIp)) {
+    logger.warn({ ip: normalizedIp }, 'Webhook rejected — IP not in TradingView allowlist');
+    res.status(403).end();
+    return;
+  }
+
+  next();
+});
+
 // Middleware
 app.use(express.json());
 
@@ -31,13 +74,10 @@ app.use((req: Request, res: Response, next) => {
   next();
 });
 
-// Health check
+// Health check (no sensitive info exposed)
 app.get('/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
-    environment: config.env,
-    longWallet: longWalletClient.getAddress(),
-    shortWallet: shortWalletClient.getAddress(),
     timestamp: Date.now(),
   });
 });
@@ -156,23 +196,15 @@ async function handleWebhook(req: Request): Promise<void> {
   }
 }
 
-// Error handler
-app.use((err: any, req: Request, res: Response, _next: any) => {
+// Error handler — log internally, reveal nothing externally
+app.use((err: any, _req: Request, res: Response, _next: any) => {
   logger.error({ error: err }, 'Unhandled error');
-  res.status(500).json({
-    status: 'error',
-    message: 'Internal server error',
-    timestamp: Date.now(),
-  });
+  res.status(500).end();
 });
 
-// 404 handler
-app.use((req: Request, res: Response) => {
-  res.status(404).json({
-    status: 'error',
-    message: 'Endpoint not found',
-    timestamp: Date.now(),
-  });
+// Catch-all (shouldn't reach here due to early reject, but just in case)
+app.use((_req: Request, res: Response) => {
+  res.status(404).end();
 });
 
 // Startup
